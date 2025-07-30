@@ -1,0 +1,29 @@
+[project]
+name = "felica-dumper"
+version = "0.1.0"
+description = "A tool for reading and extracting data from FeliCa smart cards"
+authors = [
+    {name = "KIRISHIKI Yudai", email = "yudai.kirishiki@protonmail.com"}
+]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "nfcpy @ git+https://github.com/soltia48/nfcpy.git",
+    "rich (>=14.1.0,<15.0.0)"
+]
+packages = [
+    {include = "felica_dumper"}
+]
+
+[tool.poetry]
+
+[tool.poetry.group.dev.dependencies]
+black = "^25.1.0"
+
+[tool.poetry.scripts]
+dump-felica = "felica_dumper.cli:main"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
