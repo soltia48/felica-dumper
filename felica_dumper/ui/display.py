@@ -18,23 +18,6 @@ class DisplayManager:
         self.console = console or Console()
         self.formatter = KeyVersionFormatter()
 
-    def show_header(self, tag_product: str):
-        """Display the main header."""
-        self.console.print(
-            Panel(
-                Align.center("[bold blue]FeliCa Card Reader[/bold blue]"),
-                box=box.DOUBLE,
-                border_style="blue",
-            )
-        )
-        self.console.print(
-            Panel(
-                f"[bold blue]📱 FeliCa Card Reader[/bold blue]\n[dim]Connected: {tag_product}[/dim]",
-                box=box.DOUBLE,
-                border_style="blue",
-            )
-        )
-
     def show_system_header(self, system_code: int):
         """Display system header."""
         self.console.print(
@@ -138,100 +121,146 @@ class DisplayManager:
         )
 
     def display_service_results(self, results: list[ServiceResult]):
-        """Display service results with detailed block data."""
-        self.console.print("\n[bold blue]📋 Service Processing Results[/bold blue]")
+        """Display service results with enhanced formatting and detailed block data."""
+        if not results:
+            self.console.print("[dim]No service results to display[/dim]")
+            return
 
-        for result in results:
+        # Header with results count
+        results_header = Panel(
+            f"[bold bright_blue]📋 Service Processing Results[/bold bright_blue]\n"
+            f"[dim]Displaying {len(results)} service result(s)[/dim]",
+            border_style="bright_blue",
+            box=box.ROUNDED,
+        )
+        self.console.print(results_header)
+
+        for idx, result in enumerate(results, 1):
             # Format service codes
             service_display = self.formatter.format_service_codes(result.service_codes)
 
-            # Status with icon
-            status = (
-                "[green]✅ Success[/green]"
-                if result.success
-                else "[red]❌ Failed[/red]"
+            # Enhanced status with performance indicators
+            if result.success:
+                status_icon = "✅"
+                status_text = "[bright_green]Success[/bright_green]"
+                border_color = "bright_green"
+
+                # Performance indicator based on processing time
+                if result.processing_time < 1.0:
+                    perf_icon = "⚡"
+                    perf_text = "[green]Fast[/green]"
+                elif result.processing_time < 3.0:
+                    perf_icon = "🔄"
+                    perf_text = "[yellow]Normal[/yellow]"
+                else:
+                    perf_icon = "🐌"
+                    perf_text = "[orange3]Slow[/orange3]"
+            else:
+                status_icon = "❌"
+                status_text = "[bright_red]Failed[/bright_red]"
+                border_color = "bright_red"
+                perf_icon = "⏸️"
+                perf_text = "[dim]N/A[/dim]"
+
+            # Create enhanced service header
+            service_header = (
+                f"[bold cyan]Service {service_display}[/bold cyan] | "
+                f"{status_icon} {status_text} | "
+                f"[magenta]📦 {result.block_count} blocks[/magenta] | "
+                f"[yellow]⏱️  {result.processing_time:.2f}s[/yellow] | "
+                f"{perf_icon} {perf_text}"
             )
 
-            # Create service panel
-            service_info = f"[cyan]Service: {service_display}[/cyan] | {status} | "
-            service_info += f"[magenta]Blocks: {result.block_count}[/magenta] | "
-            service_info += f"[yellow]Time: {result.processing_time:.2f}s[/yellow]"
+            panel_content = service_header
 
-            # Create panel for this service
-            panel_content = service_info
-
-            # Add used keys information with refined display
+            # Enhanced authentication information
             if result.used_keys.authentication_required:
-                key_sections = []
+                auth_sections = []
 
-                # System key section
+                # System key section with enhanced formatting
                 if result.used_keys.system_key:
                     sys_key = result.used_keys.system_key
-                    key_sections.append(
-                        f"[bold blue]🔐 System:[/bold blue] {self.formatter.format_key_info(sys_key)}"
+                    auth_sections.append(
+                        f"[bold bright_blue]🔐 System Key:[/bold bright_blue] {self.formatter.format_key_info(sys_key)}"
                     )
 
                 # Area keys section
                 if result.used_keys.area_keys:
-                    area_keys_str = ", ".join(
-                        [
-                            self.formatter.format_key_info(key)
-                            for key in result.used_keys.area_keys
-                        ]
-                    )
-                    key_sections.append(
-                        f"[bold green]🏛️  Area:[/bold green] {area_keys_str}"
+                    area_keys_display = []
+                    for key in result.used_keys.area_keys:
+                        area_keys_display.append(self.formatter.format_key_info(key))
+                    auth_sections.append(
+                        f"[bold bright_green]🏛️  Area Keys:[/bold bright_green] {', '.join(area_keys_display)}"
                     )
 
                 # Service keys section
                 if result.used_keys.service_keys:
-                    service_keys_str = ", ".join(
-                        [
-                            self.formatter.format_key_info(key)
-                            for key in result.used_keys.service_keys
-                        ]
-                    )
-                    key_sections.append(
-                        f"[bold magenta]⚙️  Service:[/bold magenta] {service_keys_str}"
+                    service_keys_display = []
+                    for key in result.used_keys.service_keys:
+                        service_keys_display.append(self.formatter.format_key_info(key))
+                    auth_sections.append(
+                        f"[bold magenta]⚙️  Service Keys:[/bold magenta] {', '.join(service_keys_display)}"
                     )
 
-                if key_sections:
-                    keys_display = "\n".join(
-                        [f"  {section}" for section in key_sections]
+                if auth_sections:
+                    auth_display = "\n".join(
+                        [f"  {section}" for section in auth_sections]
                     )
                     panel_content += (
-                        f"\n\n[dim]🔑 Authentication Keys:[/dim]\n{keys_display}"
+                        f"\n\n[bold]🔑 Authentication Details:[/bold]\n{auth_display}"
                     )
             else:
-                panel_content += f"\n\n[dim]🔓 Authentication:[/dim] [green]Not authenticated[/green]"
+                panel_content += f"\n\n[bold]🔓 Authentication:[/bold] [bright_green]No authentication required[/bright_green]"
 
-            # Add block data if available
+            # Enhanced block data display
             if result.success and result.output_lines:
-                block_data = "\n".join(
-                    [line for line in result.output_lines if "Block" in line]
-                )
-                if block_data:
-                    panel_content += (
-                        f"\n\n[dim]Block Data:[/dim]\n[green]{block_data}[/green]"
-                    )
-            elif not result.success and result.output_lines:
-                # Show error information
-                error_info = "\n".join(result.output_lines)
-                panel_content += (
-                    f"\n\n[dim]Error Details:[/dim]\n[red]{error_info}[/red]"
-                )
+                # Filter and format block data
+                block_lines = [line for line in result.output_lines if "Block" in line]
+                if block_lines:
+                    block_display = "\n".join(block_lines)
 
-            # Display the panel
-            self.console.print(
-                Panel(
-                    panel_content,
-                    title=f"Service {service_display}",
-                    border_style="green" if result.success else "red",
-                    box=box.ROUNDED,
-                    expand=False,
-                )
+                    panel_content += f"\n\n[bold]📊 Block Data:[/bold]\n[bright_green]{block_display}[/bright_green]"
+
+                # Show additional output if available
+                other_lines = [
+                    line
+                    for line in result.output_lines
+                    if "Block" not in line and line.strip()
+                ]
+                if other_lines:
+                    other_display = "\n".join(
+                        other_lines[:2]
+                    )  # Show first 2 non-block lines
+                    if len(other_lines) > 2:
+                        other_display += (
+                            f"\n[dim]... {len(other_lines) - 2} more lines[/dim]"
+                        )
+                    panel_content += f"\n\n[bold]📝 Additional Info:[/bold]\n[cyan]{other_display}[/cyan]"
+
+            elif not result.success and result.output_lines:
+                # Enhanced error information
+                error_lines = result.output_lines[:3]  # Show first 3 error lines
+                error_display = "\n".join(error_lines)
+                if len(result.output_lines) > 3:
+                    error_display += f"\n[dim]... {len(result.output_lines) - 3} more error lines[/dim]"
+                panel_content += f"\n\n[bold]💥 Error Details:[/bold]\n[bright_red]{error_display}[/bright_red]"
+
+            # Display the enhanced panel
+            panel_title = (
+                f"[bold]{idx}/{len(results)}: Service {service_display}[/bold]"
             )
-            self.console.print()  # Add spacing between services
+            service_panel = Panel(
+                panel_content,
+                title=panel_title,
+                border_style=border_color,
+                box=box.ROUNDED,
+                expand=False,
+            )
+            self.console.print(service_panel)
+
+            # Add subtle spacing between services
+            if idx < len(results):
+                self.console.print()
 
     def create_summary_panel(
         self,
