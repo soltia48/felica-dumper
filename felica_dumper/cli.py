@@ -2,7 +2,6 @@
 
 import argparse
 import time
-from typing import Optional
 
 import nfc
 from nfc.tag import Tag
@@ -16,13 +15,12 @@ from rich.progress import (
     TaskProgressColumn,
     TimeElapsedColumn,
 )
-from rich.live import Live
 from rich.panel import Panel
 from rich.align import Align
 from rich import box
 
 from .core import KeyManager, TagReader, ServiceProcessor
-from .ui import DisplayManager
+from .ui import DisplayManager, TextOutputManager
 from .utils import optimize_service_processing_order
 
 # Initialize Rich console with enhanced configuration
@@ -49,18 +47,36 @@ class DisplayStyle:
 class FelicaDumper:
     """Main FeliCa Dumper application with refined display."""
 
-    def __init__(self, keys_file: str = "keys.csv"):
+    def __init__(self, keys_file: str = "keys.csv", output_file: str | None = None):
         self.console = console
         self.display = DisplayManager(console)
         self.keys_file = keys_file
+        self.output_file = output_file
+        self.text_output = TextOutputManager(output_file) if output_file else None
         self.start_time = time.time()
 
-    def _show_connection_status(self, tag: FelicaStandard) -> None:
+    def _show_connection_status(
+        self,
+        tag: FelicaStandard,
+        idm: bytes,
+        pmm: bytes,
+    ) -> None:
         """Display enhanced connection status."""
-        connection_panel = Panel(
+        connection_text = (
             f"[{DisplayStyle.SUCCESS_COLOR}]✅ FeliCa Card Connected[/{DisplayStyle.SUCCESS_COLOR}]\n"
             f"[{DisplayStyle.INFO_COLOR}]📱 Product: {tag.product}[/{DisplayStyle.INFO_COLOR}]\n"
-            f"[{DisplayStyle.DIM_COLOR}]🕐 Connected at: {time.strftime('%H:%M:%S')}[/{DisplayStyle.DIM_COLOR}]",
+        )
+
+        idm_hex = idm.hex().upper()
+        connection_text += f"[{DisplayStyle.ACCENT_COLOR}]🆔 IDm: {idm_hex}[/{DisplayStyle.ACCENT_COLOR}]\n"
+
+        pmm_hex = pmm.hex().upper()
+        connection_text += f"[{DisplayStyle.PRIMARY_COLOR}]📋 PMm: {pmm_hex}[/{DisplayStyle.PRIMARY_COLOR}]\n"
+
+        connection_text += f"[{DisplayStyle.DIM_COLOR}]🕐 Connected at: {time.strftime('%H:%M:%S')}[/{DisplayStyle.DIM_COLOR}]"
+
+        connection_panel = Panel(
+            connection_text,
             title="[bold]Connection Status[/bold]",
             border_style=DisplayStyle.SUCCESS_COLOR,
             box=DisplayStyle.PANEL_BOX,
@@ -87,7 +103,7 @@ class FelicaDumper:
         )
 
     def _show_processing_progress(
-        self, description: str, total: Optional[int] = None
+        self, description: str, total: int | None = None
     ) -> Progress:
         """Create consistent progress display."""
         columns = [
@@ -130,9 +146,6 @@ class FelicaDumper:
             self.console.print(error_panel)
             return
 
-        # Show connection status
-        self._show_connection_status(tag)
-
         # Get system codes with progress
         with self._show_processing_progress(
             "🔍 Discovering system codes..."
@@ -149,6 +162,14 @@ class FelicaDumper:
                 f"[{DisplayStyle.WARNING_COLOR}]⚠️  No system codes found[/{DisplayStyle.WARNING_COLOR}]"
             )
             return
+
+        # Get IDm and PMm from the first system for display
+        first_system_code = system_codes[0]
+        polling_result = tag.polling(first_system_code)
+        idm, pmm = polling_result[:2]
+
+        # Show connection status with IDm and PMm
+        self._show_connection_status(tag, idm, pmm)
 
         # Process each system
         for system_idx, system_code in enumerate(system_codes, 1):
@@ -286,10 +307,73 @@ class FelicaDumper:
                     successful, failed, total_blocks, total_time, processing_time
                 )
                 self.console.print(enhanced_summary)
+
+                # Write to text file if output is specified
+                if self.text_output:
+                    self.text_output.write_system_data(
+                        system_code=system_code,
+                        idm=idm,
+                        pmm=pmm,
+                        keys_file=self.keys_file,
+                        keys_count=len(keys),
+                        areas_count=len(areas),
+                        services_count=len(services),
+                        areas=areas,
+                        key_versions=key_versions,
+                        results=results,
+                        successful=successful,
+                        failed=failed,
+                        total_blocks=total_blocks,
+                        total_time=total_time,
+                        processing_time=processing_time,
+                    )
             else:
                 self.console.print(
                     f"[{DisplayStyle.WARNING_COLOR}]⚠️  No services found in this system[/{DisplayStyle.WARNING_COLOR}]"
                 )
+
+                # Write to text file even if no services found
+                if self.text_output:
+                    self.text_output.write_system_data(
+                        system_code=system_code,
+                        idm=idm,
+                        pmm=pmm,
+                        keys_file=self.keys_file,
+                        keys_count=len(keys),
+                        areas_count=len(areas),
+                        services_count=0,
+                        areas=areas,
+                        key_versions=key_versions,
+                        results=[],
+                        successful=0,
+                        failed=0,
+                        total_blocks=0,
+                        total_time=0.0,
+                        processing_time=time.time() - self.start_time,
+                    )
+
+        # Save text output file after processing all systems
+        if self.text_output:
+            try:
+                self.text_output.save_to_file()
+                output_path = self.text_output.get_output_path()
+                success_panel = Panel(
+                    f"[{DisplayStyle.SUCCESS_COLOR}]📄 Results saved to text file[/{DisplayStyle.SUCCESS_COLOR}]\n"
+                    f"[{DisplayStyle.INFO_COLOR}]File: {output_path}[/{DisplayStyle.INFO_COLOR}]",
+                    title="Text Output",
+                    border_style=DisplayStyle.SUCCESS_COLOR,
+                    box=DisplayStyle.PANEL_BOX,
+                )
+                self.console.print(success_panel)
+            except Exception as e:
+                error_panel = Panel(
+                    f"[{DisplayStyle.ERROR_COLOR}]❌ Failed to save text output[/{DisplayStyle.ERROR_COLOR}]\n"
+                    f"Error: {str(e)}",
+                    title="Output Error",
+                    border_style=DisplayStyle.ERROR_COLOR,
+                    box=DisplayStyle.PANEL_BOX,
+                )
+                self.console.print(error_panel)
 
     def _create_enhanced_summary(
         self,
@@ -343,13 +427,13 @@ class FelicaDumper:
         )
 
 
-def create_on_connect_callback(keys_file: str):
-    """Create a callback function with the specified keys file."""
+def create_on_connect_callback(keys_file: str, output_file: str | None = None):
+    """Create a callback function with the specified keys file and output file."""
 
     def on_connect(tag: Tag) -> None:
         """Enhanced callback function when a tag is connected."""
         try:
-            dumper = FelicaDumper(keys_file)
+            dumper = FelicaDumper(keys_file, output_file)
             if isinstance(tag, FelicaStandard):
                 dumper.process_tag(tag)
             else:
@@ -384,9 +468,11 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s                    # Use default keys.csv file
-  %(prog)s --keys mykeys.csv  # Use custom keys file
-  %(prog)s -k /path/to/keys   # Use keys from specific path
+  %(prog)s                              # Use default keys.csv file
+  %(prog)s --keys mykeys.csv            # Use custom keys file
+  %(prog)s -k /path/to/keys             # Use keys from specific path
+  %(prog)s -o results.txt               # Save results to text file
+  %(prog)s -k mykeys.csv -o output.txt  # Use custom keys and save to file
         """,
     )
     parser.add_argument(
@@ -394,6 +480,12 @@ Examples:
         "-k",
         default="keys.csv",
         help="Path to the keys CSV file (default: keys.csv)",
+        metavar="FILE",
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        help="Path to output text file for results (optional)",
         metavar="FILE",
     )
     parser.add_argument(
@@ -418,19 +510,26 @@ Examples:
     console.print(header_panel)
 
     # Show configuration
-    config_panel = Panel(
+    config_text = (
         f"[{DisplayStyle.INFO_COLOR}]🔧 Configuration:[/{DisplayStyle.INFO_COLOR}]\n"
         f"  Keys file: [bold]{args.keys}[/bold]\n"
         f"  NFC Interface: USB\n"
-        f"  Supported frequencies: 212F, 424F",
+        f"  Supported frequencies: 212F, 424F"
+    )
+
+    if args.output:
+        config_text += f"\n  Output file: [bold]{args.output}[/bold]"
+
+    config_panel = Panel(
+        config_text,
         title="Setup",
         border_style=DisplayStyle.INFO_COLOR,
         box=DisplayStyle.PANEL_BOX,
     )
     console.print(config_panel)
 
-    # Create callback with the specified keys file
-    on_connect_callback = create_on_connect_callback(args.keys)
+    # Create callback with the specified keys file and output file
+    on_connect_callback = create_on_connect_callback(args.keys, args.output)
 
     try:
         with nfc.ContactlessFrontend("usb") as clf:
