@@ -173,8 +173,12 @@ class DisplayManager:
 
             panel_content = service_header
 
-            # Enhanced authentication information
-            if result.used_keys.authentication_required:
+            # Enhanced authentication information based on authentication status
+            auth_status = result.used_keys.authentication_status
+
+            if auth_status == "none":
+                panel_content += f"\n\n[bold]🔓 Authentication:[/bold] [bright_green]No authentication required[/bright_green]"
+            elif auth_status == "successful":
                 auth_sections = []
 
                 # System key section with enhanced formatting
@@ -206,11 +210,11 @@ class DisplayManager:
                     auth_display = "\n".join(
                         [f"  {section}" for section in auth_sections]
                     )
-                    panel_content += (
-                        f"\n\n[bold]🔑 Authentication Details:[/bold]\n{auth_display}"
-                    )
-            else:
-                panel_content += f"\n\n[bold]🔓 Authentication:[/bold] [bright_green]No authentication required[/bright_green]"
+                    panel_content += f"\n\n[bold]🔑 Authentication:[/bold] [bright_green]✅ Successful[/bright_green]\n{auth_display}"
+            elif auth_status == "failed_missing_keys":
+                panel_content += f"\n\n[bold]🔑 Authentication:[/bold] [bright_red]❌ Failed - Missing required keys[/bright_red]"
+            elif auth_status == "failed_error":
+                panel_content += f"\n\n[bold]🔑 Authentication:[/bold] [bright_red]❌ Failed - Authentication error[/bright_red]"
 
             # Enhanced block data display
             if result.success and result.output_lines:

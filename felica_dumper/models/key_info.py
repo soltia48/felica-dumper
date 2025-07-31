@@ -1,6 +1,7 @@
 """Key information data models."""
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 
 @dataclass
@@ -26,6 +27,9 @@ class UsedKeys:
     area_keys: list[KeyInfo] = field(default_factory=list)  # List of area keys
     service_keys: list[KeyInfo] = field(default_factory=list)  # List of service keys
     authentication_required: bool = False  # Whether authentication was required
+    authentication_status: Literal[
+        "none", "successful", "failed_missing_keys", "failed_error"
+    ] = "none"  # Authentication status
 
     def get_all_keys(self) -> list[KeyInfo]:
         """Get all used keys"""

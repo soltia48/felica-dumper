@@ -188,6 +188,7 @@ class ServiceProcessor:
         try:
             # Record that no authentication was required
             used_keys.authentication_required = False
+            used_keys.authentication_status = "none"
 
             output_lines, block_count = self.tag_reader.read_blocks_without_encryption(
                 service_code, MAX_BLOCKS
@@ -214,7 +215,18 @@ class ServiceProcessor:
             )
 
             if not auth_success:
+                # Check if failure was due to missing keys
+                missing_key_errors = [
+                    msg for msg in error_messages if "not found" in msg
+                ]
+                if missing_key_errors:
+                    used_keys.authentication_status = "failed_missing_keys"
+                else:
+                    used_keys.authentication_status = "failed_error"
                 return False, 0, error_messages
+
+            # Authentication successful
+            used_keys.authentication_status = "successful"
 
             # Read blocks using authenticated method
             output_lines, block_count = self.tag_reader.read_blocks_with_authentication(
@@ -224,6 +236,7 @@ class ServiceProcessor:
             return True, block_count, output_lines
 
         except Exception as e:
+            used_keys.authentication_status = "failed_error"
             error_lines = [f"  ✗ Authentication/read failed: {e}"]
             return False, 0, error_lines
 
