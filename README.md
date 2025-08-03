@@ -43,11 +43,18 @@ poetry run dump-felica
 # Specify custom keys file
 poetry run dump-felica --keys /path/to/your/keys.csv
 poetry run dump-felica -k custom_keys.csv
+
+# Save results to text file
+poetry run dump-felica -o results.txt
+
+# Use custom keys and save to file
+poetry run dump-felica -k mykeys.csv -o output.txt
 ```
 
 ### Command Line Options
 
 - `--keys, -k`: Path to the keys CSV file (default: `keys.csv`)
+- `--output, -o`: Path to output text file for saving extraction results (optional)
 
 ### Workflow
 
@@ -116,7 +123,7 @@ The project is organized into several key modules:
 ### Setup Development Environment
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/soltia48/felica-dumper.git
 cd felica-dumper
 poetry install
 poetry run black .  # Code formatting
@@ -130,7 +137,7 @@ poetry run black .  # Code formatting
 
 ## Authors
 
-- KIRISHIKI Yudai <yudai.kirishiki@protonmail.com>
+- KIRISHIKI Yudai
 
 ## License
 
