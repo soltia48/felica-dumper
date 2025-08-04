@@ -27,7 +27,7 @@ The tool can:
 ## Installation
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/soltia48/felica-dumper.git
 cd felica-dumper
 poetry install
 ```
