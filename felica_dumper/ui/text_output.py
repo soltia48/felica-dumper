@@ -1,12 +1,32 @@
 """Text output manager for FeliCa Dumper results."""
 
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from ..models import ServiceResult
 from .formatters import KeyVersionFormatter
+
+
+@dataclass
+class SystemExportData:
+    """Aggregated data for exporting a system report."""
+
+    system_code: int
+    idm: bytes
+    pmm: bytes
+    idi: bytes | str | None
+    pmi: bytes | str | None
+    keys_file: str
+    keys_count: int
+    areas_count: int
+    services_count: int
+    service_groups: list[list[int]]
+    areas: list[tuple[int, int]]
+    key_versions: dict[str, Any]
+    results: list[ServiceResult]
 
 
 class TextOutputManager:
@@ -25,6 +45,20 @@ class TextOutputManager:
         # Keep basic emojis but remove complex formatting
         return clean_text.strip()
 
+    @staticmethod
+    def _format_identifier(value: bytes | str | None) -> str:
+        """Format identifier values to uppercase string representation."""
+        if value is None:
+            return "N/A"
+        if isinstance(value, bytes):
+            return value.hex().upper()
+        if isinstance(value, str):
+            return value.upper()
+        try:
+            return bytes(value).hex().upper()  # type: ignore[arg-type]
+        except Exception:
+            return str(value).upper()
+
     def _add_header(self, keys_file: str) -> None:
         """Add file header with timestamp and configuration."""
         self.content_lines.extend(
@@ -42,6 +76,8 @@ class TextOutputManager:
         system_code: int,
         idm: bytes,
         pmm: bytes,
+        idi: bytes | str | None,
+        pmi: bytes | str | None,
         keys_count: int,
         areas_count: int,
         services_count: int,
@@ -56,6 +92,8 @@ class TextOutputManager:
             [
                 f"IDm: {idm.hex().upper()}",
                 f"PMm: {pmm.hex().upper()}",
+                f"IDi: {self._format_identifier(idi)}",
+                f"PMi: {self._format_identifier(pmi)}",
                 f"Available Keys: {keys_count}",
                 f"Discovered Areas: {areas_count}",
                 f"Found Services: {services_count}",
@@ -65,229 +103,333 @@ class TextOutputManager:
 
         self.content_lines.extend(overview_lines)
 
-    def _add_areas_section(
-        self, areas: list[tuple[int, int]], key_versions: dict[str, Any]
-    ) -> None:
-        """Add areas information section."""
-        if not areas:
-            return
+    BLOCK_PREVIEW_LIMIT = 16
 
+    def _add_system_tree(
+        self,
+        areas: list[tuple[int, int]],
+        service_groups: list[list[int]],
+        key_versions: dict[str, Any],
+        results: list[ServiceResult],
+    ) -> None:
+        """Add a hierarchy-style section similar to the CLI tree output."""
         self.content_lines.extend(
             [
-                "Areas",
+                "Hierarchy",
                 "=" * 20,
             ]
         )
 
-        for i, (start, end) in enumerate(areas):
-            key_info = "Not available"
-            if (start, end) in key_versions["areas"]:
-                result = key_versions["areas"][(start, end)]
-                key_info = self._strip_rich_markup(
-                    self.formatter.format_key_version(result)
-                )
+        area_nodes, root_areas = self._build_area_hierarchy(areas)
+        unassigned_groups = self._assign_service_groups_to_areas(
+            area_nodes, service_groups
+        )
+        result_lookup = self._build_result_lookup(results)
 
-            area_range = self.formatter.format_area_range(start, end)
-            self.content_lines.append(f"Area {i+1}: {area_range} - {key_info}")
+        if root_areas:
+            for area in root_areas:
+                self._append_area_branch(
+                    area=area,
+                    nodes=area_nodes,
+                    key_versions=key_versions,
+                    result_lookup=result_lookup,
+                    indent=0,
+                )
+        else:
+            self.content_lines.append("No areas discovered for this system.")
+
+        if unassigned_groups:
+            if root_areas:
+                self.content_lines.append("")
+            self.content_lines.append("Services without matching area:")
+            for group in unassigned_groups:
+                self._append_service_group_line(
+                    service_group=group,
+                    key_versions=key_versions,
+                    result_lookup=result_lookup,
+                    indent=1,
+                )
 
         self.content_lines.append("")
 
-    def _add_service_results(self, results: list[ServiceResult]) -> None:
-        """Add service results section."""
-        if not results:
-            self.content_lines.extend(
-                ["Service Results", "=" * 30, "No service results to display", ""]
+    def _append_area_branch(
+        self,
+        area: tuple[int, int],
+        nodes: dict[tuple[int, int], dict],
+        key_versions: dict[str, Any],
+        result_lookup: dict[tuple[int, ...], ServiceResult],
+        indent: int,
+    ) -> None:
+        """Append an area node and its children."""
+        indent_str = "  " * indent
+        label = self._format_area_label(area, key_versions)
+        self.content_lines.append(f"{indent_str}{label}")
+
+        groups = nodes[area]["groups"]
+        if groups:
+            for group in groups:
+                self._append_service_group_line(
+                    service_group=group,
+                    key_versions=key_versions,
+                    result_lookup=result_lookup,
+                    indent=indent + 1,
+                )
+        else:
+            self.content_lines.append(f"{indent_str}  (No services assigned)")
+
+        for child in nodes[area]["children"]:
+            self._append_area_branch(
+                child, nodes, key_versions, result_lookup, indent + 1
+            )
+
+    def _append_service_group_line(
+        self,
+        service_group: list[int],
+        key_versions: dict[str, Any],
+        result_lookup: dict[tuple[int, ...], ServiceResult],
+        indent: int,
+    ) -> None:
+        """Append a service group line with status and optional block data."""
+        indent_str = "  " * indent
+        label = self._compose_service_group_label(service_group, key_versions)
+
+        result = self._find_service_result(service_group, result_lookup)
+        meta_segments: list[str] = []
+        if result is not None:
+            status_text = "success" if result.success else "failed"
+            meta_segments.append(f"status: {status_text}")
+            meta_segments.append(f"blocks: {result.block_count}")
+
+            if result.used_keys.authentication_status not in ("none", ""):
+                meta_segments.append(
+                    f"auth: {result.used_keys.authentication_status.replace('_', ' ')}"
+                )
+
+        key_info_parts = self._collect_service_key_info(service_group, key_versions)
+        if key_info_parts:
+            meta_segments.append(f"keys: {', '.join(key_info_parts)}")
+
+        if meta_segments:
+            label = f"{label} [{' | '.join(meta_segments)}]"
+
+        self.content_lines.append(f"{indent_str}- {label}")
+
+        if result is None:
+            return
+
+        if result.success:
+            self._append_block_lines(result, indent + 2)
+        else:
+            self._append_error_lines(result, indent + 2)
+
+    def _append_block_lines(self, result: ServiceResult, indent: int) -> None:
+        """Append block data lines with indentation."""
+        block_lines = [
+            line.strip()
+            for line in result.output_lines
+            if "Block" in line and line.strip()
+        ]
+        indent_str = "  " * indent
+
+        if not block_lines:
+            if result.block_count > 0:
+                self.content_lines.append(
+                    f"{indent_str}(Read {result.block_count} block(s), no textual data)"
+                )
+            else:
+                self.content_lines.append(f"{indent_str}(No block data available)")
+            return
+
+        preview = block_lines[: self.BLOCK_PREVIEW_LIMIT]
+        for line in preview:
+            clean_line = self._strip_rich_markup(line)
+            self.content_lines.append(f"{indent_str}{clean_line}")
+
+        remaining = len(block_lines) - len(preview)
+        if remaining > 0:
+            self.content_lines.append(
+                f"{indent_str}... {remaining} more block line(s) omitted"
+            )
+
+    def _append_error_lines(self, result: ServiceResult, indent: int) -> None:
+        """Append error message lines with indentation."""
+        messages = [line.strip() for line in result.output_lines if line.strip()]
+        indent_str = "  " * indent
+
+        if not messages:
+            self.content_lines.append(
+                f"{indent_str}(Processing failed with no additional details.)"
             )
             return
 
-        self.content_lines.extend(
-            [
-                "Service Results",
-                "=" * 30,
-            ]
-        )
+        preview = messages[:3]
+        for line in preview:
+            clean_line = self._strip_rich_markup(line)
+            self.content_lines.append(f"{indent_str}{clean_line}")
 
-        for idx, result in enumerate(results, 1):
-            service_display = self.formatter.format_service_codes(result.service_codes)
-
-            # Status and basic info
-            status = "Success" if result.success else "Failed"
-            perf_indicator = ""
-            if result.success:
-                if result.processing_time < 1.0:
-                    perf_indicator = " (Fast)"
-                elif result.processing_time < 3.0:
-                    perf_indicator = " (Normal)"
-                else:
-                    perf_indicator = " (Slow)"
-
-            self.content_lines.extend(
-                [
-                    f"Service {service_display} | {status} | {result.block_count} blocks | {result.processing_time:.2f}s{perf_indicator}",
-                    "-" * 60,
-                ]
+        remaining = len(messages) - len(preview)
+        if remaining > 0:
+            self.content_lines.append(
+                f"{indent_str}... {remaining} additional message(s)"
             )
 
-            # Authentication information
-            auth_status = result.used_keys.authentication_status
-            if auth_status == "none":
-                self.content_lines.append("Authentication: No authentication required")
-            elif auth_status == "successful":
-                self.content_lines.append("Authentication: Successful")
+    def _format_area_label(
+        self, area: tuple[int, int], key_versions: dict[str, Any]
+    ) -> str:
+        """Format area label text with optional key version."""
+        area_range = self.formatter.format_area_range(*area)
+        key_info = ""
+        if "areas" in key_versions and area in key_versions["areas"]:
+            key_display = self.formatter.format_key_version(key_versions["areas"][area])
+            key_info = f" - {self._strip_rich_markup(key_display)}"
+        return f"Area [{area_range}]{key_info}"
 
-                # System key
-                if result.used_keys.system_key:
-                    sys_key = result.used_keys.system_key
-                    key_info = self._strip_rich_markup(
-                        self.formatter.format_key_info(sys_key)
-                    )
-                    self.content_lines.append(f"  System Key: {key_info}")
+    def _compose_service_group_label(
+        self, service_group: list[int], key_versions: dict[str, Any]
+    ) -> str:
+        """Compose a textual description for a service group."""
+        service_display = self.formatter.format_service_codes(service_group)
+        if len(service_group) == 1:
+            label = f"Service {service_display}"
+        else:
+            label = f"Service group {service_display}"
 
-                # Area keys
-                if result.used_keys.area_keys:
-                    area_keys_display = []
-                    for key in result.used_keys.area_keys:
-                        key_info = self._strip_rich_markup(
-                            self.formatter.format_key_info(key)
-                        )
-                        area_keys_display.append(key_info)
-                    self.content_lines.append(
-                        f"  Area Keys: {', '.join(area_keys_display)}"
-                    )
+        auth_values = [bool(sc & 1) for sc in service_group]
+        if all(auth_values):
+            auth_text = "no authentication required"
+        elif any(auth_values):
+            auth_text = "mixed authentication requirements"
+        else:
+            auth_text = "authentication required"
 
-                # Service keys
-                if result.used_keys.service_keys:
-                    service_keys_display = []
-                    for key in result.used_keys.service_keys:
-                        key_info = self._strip_rich_markup(
-                            self.formatter.format_key_info(key)
-                        )
-                        service_keys_display.append(key_info)
-                    self.content_lines.append(
-                        f"  Service Keys: {', '.join(service_keys_display)}"
-                    )
+        return f"{label} ({auth_text})"
 
-            elif auth_status == "failed_missing_keys":
-                self.content_lines.append(
-                    "Authentication: Failed - Missing required keys"
-                )
-            elif auth_status == "failed_error":
-                self.content_lines.append(
-                    "Authentication: Failed - Authentication error"
-                )
+    def _collect_service_key_info(
+        self, service_group: list[int], key_versions: dict[str, Any]
+    ) -> list[str]:
+        """Collect key version information for service codes."""
+        info: list[str] = []
+        service_keys = key_versions.get("services", {})
+        for sc in service_group:
+            if sc in service_keys:
+                key_display = self.formatter.format_key_version(service_keys[sc])
+                info.append(f"0x{sc:04X}:{self._strip_rich_markup(key_display)}")
+        return info
 
-            # Block data
-            if result.success and result.output_lines:
-                block_lines = [line for line in result.output_lines if "Block" in line]
-                if block_lines:
-                    self.content_lines.append("Block Data:")
-                    for line in block_lines:
-                        clean_line = self._strip_rich_markup(line)
-                        self.content_lines.append(f"  {clean_line}")
+    def _build_area_hierarchy(
+        self, areas: list[tuple[int, int]]
+    ) -> tuple[dict[tuple[int, int], dict], list[tuple[int, int]]]:
+        """Build parent-child relationships between areas based on containment."""
+        if not areas:
+            return {}, []
 
-                # Additional output
-                other_lines = [
-                    line
-                    for line in result.output_lines
-                    if "Block" not in line and line.strip()
-                ]
-                if other_lines:
-                    self.content_lines.append("Additional Info:")
-                    for line in other_lines[:5]:  # Limit to first 5 lines
-                        clean_line = self._strip_rich_markup(line)
-                        self.content_lines.append(f"  {clean_line}")
-                    if len(other_lines) > 5:
-                        self.content_lines.append(
-                            f"  ... {len(other_lines) - 5} more lines"
-                        )
+        nodes = {area: {"children": [], "groups": [], "parent": None} for area in areas}
 
-            elif not result.success and result.output_lines:
-                self.content_lines.append("Error Details:")
-                for line in result.output_lines[:3]:  # Show first 3 error lines
-                    clean_line = self._strip_rich_markup(line)
-                    self.content_lines.append(f"  {clean_line}")
-                if len(result.output_lines) > 3:
-                    self.content_lines.append(
-                        f"  ... {len(result.output_lines) - 3} more error lines"
-                    )
+        sorted_areas = sorted(areas, key=lambda a: (a[0], (a[1] - a[0]), a[1]))
 
-            self.content_lines.append("")
+        for current in sorted_areas:
+            best_parent: tuple[int, int] | None = None
+            smallest_size = None
 
-    def _add_summary(
+            for candidate in sorted_areas:
+                if candidate == current:
+                    continue
+
+                if candidate[0] <= current[0] and current[1] <= candidate[1]:
+                    candidate_size = candidate[1] - candidate[0]
+                    if smallest_size is None or candidate_size < smallest_size:
+                        best_parent = candidate
+                        smallest_size = candidate_size
+
+            if best_parent is not None:
+                nodes[current]["parent"] = best_parent
+                nodes[best_parent]["children"].append(current)
+
+        for node in nodes.values():
+            node["children"].sort(key=lambda a: (a[0], (a[1] - a[0]), a[1]))
+
+        root_areas = [area for area, data in nodes.items() if data["parent"] is None]
+        root_areas.sort(key=lambda a: (a[0], (a[1] - a[0]), a[1]))
+
+        return nodes, root_areas
+
+    def _assign_service_groups_to_areas(
         self,
-        successful: int,
-        failed: int,
-        total_blocks: int,
-        total_time: float,
-        processing_time: float,
-    ) -> None:
-        """Add final summary section."""
-        total_services = successful + failed
-        success_rate = (successful / total_services * 100) if total_services > 0 else 0
+        area_nodes: dict[tuple[int, int], dict],
+        service_groups: list[list[int]],
+    ) -> list[list[int]]:
+        """Assign service groups to the most specific area that contains them."""
+        if not area_nodes:
+            return service_groups.copy()
 
-        status_text = (
-            "Excellent"
-            if success_rate >= 90
-            else (
-                "Good"
-                if success_rate >= 75
-                else "Partial" if success_rate >= 50 else "Poor"
-            )
-        )
+        unassigned: list[list[int]] = []
 
-        avg_time = (total_time / total_services) if total_services > 0 else 0
+        for group in service_groups:
+            if not group:
+                continue
 
-        self.content_lines.extend(
-            [
-                "Final Summary",
-                "=" * 30,
-                f"Processing Complete - {status_text} Results",
-                "",
-                f"Successful Services: {successful}",
-                f"Failed Services: {failed}",
-                f"Success Rate: {success_rate:.1f}%",
-                f"Total Blocks Read: {total_blocks:,}",
-                f"Service Processing Time: {total_time:.2f}s",
-                f"Total Session Time: {processing_time:.2f}s",
-                f"Average per Service: {avg_time:.2f}s",
-                "",
-            ]
-        )
+            primary = min(group)
+            candidates = [area for area in area_nodes if area[0] <= primary <= area[1]]
 
-    def write_system_data(
+            if not candidates:
+                unassigned.append(group)
+                continue
+
+            target = min(candidates, key=lambda a: (a[1] - a[0], a[0], a[1]))
+            area_nodes[target]["groups"].append(group)
+
+        return unassigned
+
+    def _build_result_lookup(
+        self, service_results: list[ServiceResult]
+    ) -> dict[tuple[int, ...], ServiceResult]:
+        """Create a lookup from service code tuples to results."""
+        lookup: dict[tuple[int, ...], ServiceResult] = {}
+        for result in service_results:
+            key = tuple(result.service_codes)
+            lookup[key] = result
+            sorted_key = tuple(sorted(result.service_codes))
+            lookup[sorted_key] = result
+        return lookup
+
+    def _find_service_result(
         self,
-        system_code: int,
-        idm: bytes,
-        pmm: bytes,
-        keys_file: str,
-        keys_count: int,
-        areas_count: int,
-        services_count: int,
-        areas: list[tuple[int, int]],
-        key_versions: dict[str, Any],
-        results: list[ServiceResult],
-        successful: int,
-        failed: int,
-        total_blocks: int,
-        total_time: float,
-        processing_time: float,
-    ) -> None:
+        service_group: list[int],
+        lookup: dict[tuple[int, ...], ServiceResult],
+    ) -> ServiceResult | None:
+        """Locate the ServiceResult corresponding to a service group."""
+        if not lookup:
+            return None
+
+        key = tuple(service_group)
+        if key in lookup:
+            return lookup[key]
+
+        sorted_key = tuple(sorted(service_group))
+        return lookup.get(sorted_key)
+
+    def write_system_data(self, data: SystemExportData) -> None:
         """Write complete system data to text file."""
         # Clear previous content for new system
         if not self.content_lines:  # Only add header for first system
-            self._add_header(keys_file)
+            self._add_header(data.keys_file)
 
         self._add_system_overview(
-            system_code,
-            idm,
-            pmm,
-            keys_count,
-            areas_count,
-            services_count,
+            data.system_code,
+            data.idm,
+            data.pmm,
+            data.idi,
+            data.pmi,
+            data.keys_count,
+            data.areas_count,
+            data.services_count,
         )
-        self._add_areas_section(areas, key_versions)
-        self._add_service_results(results)
-        self._add_summary(successful, failed, total_blocks, total_time, processing_time)
+        self._add_system_tree(
+            areas=data.areas,
+            service_groups=data.service_groups,
+            key_versions=data.key_versions,
+            results=data.results,
+        )
 
         # Add separator for multiple systems
         self.content_lines.extend(["=" * 80, ""])

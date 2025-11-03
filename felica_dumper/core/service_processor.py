@@ -210,7 +210,12 @@ class ServiceProcessor:
         """Read service data with authentication."""
         try:
             # Authenticate
-            auth_success, error_messages = self.auth_handler.authenticate_service(
+            (
+                auth_success,
+                issue_id,
+                issue_parameter,
+                error_messages,
+            ) = self.auth_handler.authenticate_service(
                 service_code, areas, keys, used_keys
             )
 
@@ -227,6 +232,8 @@ class ServiceProcessor:
 
             # Authentication successful
             used_keys.authentication_status = "successful"
+            used_keys.issue_id = issue_id
+            used_keys.issue_parameter = issue_parameter
 
             # Read blocks using authenticated method
             output_lines, block_count = self.tag_reader.read_blocks_with_authentication(

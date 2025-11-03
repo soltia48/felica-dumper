@@ -20,7 +20,7 @@ class AuthenticationHandler:
         areas: list[tuple[int, int]],
         keys: dict[int, KeyInfo],
         used_keys: UsedKeys | None = None,
-    ) -> tuple[bool, list[str]]:
+    ) -> tuple[bool, bytes | None, bytes | None, list[str]]:
         """Authenticate for a service and return success status and messages.
 
         Args:
@@ -30,7 +30,7 @@ class AuthenticationHandler:
             used_keys: Optional UsedKeys object to track used keys
 
         Returns:
-            Tuple of (success, error_messages)
+            Tuple of (success, issue_id, issue_parameter, error_messages)
         """
         error_messages = []
 
@@ -42,7 +42,7 @@ class AuthenticationHandler:
 
         if not containing_areas:
             error_messages.append(f"  ✗ Service not found in any area")
-            return False, error_messages
+            return False, None, None, error_messages
 
         containing_areas.sort(key=lambda x: x[0])
 
@@ -51,11 +51,11 @@ class AuthenticationHandler:
             error_messages.append(
                 f"  ✗ System key (0x{SYSTEM_KEY_NODE_ID:04X}) not found"
             )
-            return False, error_messages
+            return False, None, None, error_messages
 
         if service_code not in keys:
             error_messages.append(f"  ✗ Service key (0x{service_code:04X}) not found")
-            return False, error_messages
+            return False, None, None, error_messages
 
         # Record used keys
         if used_keys is not None:
@@ -96,11 +96,32 @@ class AuthenticationHandler:
                 area_codes, service_codes, group_service_key, user_service_key
             )
 
-            return True, error_messages
+            issue_id_bytes = self._normalize_identifier(issue_id)
+            issue_parameter_bytes = self._normalize_identifier(issue_parameter)
+
+            return True, issue_id_bytes, issue_parameter_bytes, error_messages
 
         except Exception as e:
             error_messages.append(f"  ✗ Authentication failed: {e}")
-            return False, error_messages
+            return False, None, None, error_messages
+
+    @staticmethod
+    def _normalize_identifier(value) -> bytes | None:
+        """Ensure identifier values are returned as bytes when possible."""
+        if value is None:
+            return None
+        if isinstance(value, bytes):
+            return value
+        if isinstance(value, str):
+            cleaned = value.strip()
+            try:
+                return bytes.fromhex(cleaned)
+            except ValueError:
+                return cleaned.encode("utf-8")
+        try:
+            return bytes(value)
+        except Exception:
+            return str(value).encode("utf-8")
 
     def requires_authentication(self, service_code: int) -> bool:
         """Check if service requires authentication based on service code.

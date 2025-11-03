@@ -6,7 +6,7 @@ import time
 import nfc
 from nfc.tag import Tag
 from nfc.tag.tt3_sony import FelicaStandard
-from rich.console import Console
+from rich.console import Console, Group
 from rich.progress import (
     Progress,
     SpinnerColumn,
@@ -18,9 +18,11 @@ from rich.progress import (
 from rich.panel import Panel
 from rich.align import Align
 from rich import box
+from rich.table import Table
 
 from .core import KeyManager, TagReader, ServiceProcessor
-from .ui import DisplayManager, TextOutputManager
+from .models import ServiceResult
+from .ui import DisplayManager, TextOutputManager, SystemExportData
 from .utils import optimize_service_processing_order
 
 # Initialize Rich console with enhanced configuration
@@ -55,6 +57,18 @@ class FelicaDumper:
         self.text_output = TextOutputManager(output_file) if output_file else None
         self.start_time = time.time()
 
+    @staticmethod
+    def _info_table(
+        rows: list[tuple[str, str]], label_style: str = DisplayStyle.DIM_COLOR
+    ) -> Table:
+        """Create a small table for key/value information."""
+        table = Table.grid(padding=(0, 1))
+        table.add_column(style=label_style, justify="right", no_wrap=True)
+        table.add_column(style="white")
+        for label, value in rows:
+            table.add_row(label, value)
+        return table
+
     def _show_connection_status(
         self,
         tag: FelicaStandard,
@@ -62,22 +76,19 @@ class FelicaDumper:
         pmm: bytes,
     ) -> None:
         """Display enhanced connection status."""
-        connection_text = (
-            f"[{DisplayStyle.SUCCESS_COLOR}]✅ FeliCa Card Connected[/{DisplayStyle.SUCCESS_COLOR}]\n"
-            f"[{DisplayStyle.INFO_COLOR}]📱 Product: {tag.product}[/{DisplayStyle.INFO_COLOR}]\n"
-        )
-
         idm_hex = idm.hex().upper()
-        connection_text += f"[{DisplayStyle.ACCENT_COLOR}]🆔 IDm: {idm_hex}[/{DisplayStyle.ACCENT_COLOR}]\n"
-
         pmm_hex = pmm.hex().upper()
-        connection_text += f"[{DisplayStyle.PRIMARY_COLOR}]📋 PMm: {pmm_hex}[/{DisplayStyle.PRIMARY_COLOR}]\n"
-
-        connection_text += f"[{DisplayStyle.DIM_COLOR}]🕐 Connected at: {time.strftime('%H:%M:%S')}[/{DisplayStyle.DIM_COLOR}]"
+        connection_rows = [
+            ("Status", f"[{DisplayStyle.SUCCESS_COLOR}]Connected[/]"),
+            ("Product", f"[bold]{tag.product}[/bold]"),
+            ("IDm", idm_hex),
+            ("PMm", pmm_hex),
+            ("Connected", time.strftime("%H:%M:%S")),
+        ]
 
         connection_panel = Panel(
-            connection_text,
-            title="[bold]Connection Status[/bold]",
+            self._info_table(connection_rows),
+            title="Connection Status",
             border_style=DisplayStyle.SUCCESS_COLOR,
             box=DisplayStyle.PANEL_BOX,
         )
@@ -87,17 +98,16 @@ class FelicaDumper:
         self, system_code: int, keys_count: int, areas_count: int, services_count: int
     ) -> Panel:
         """Create an enhanced system overview panel."""
-        overview_text = (
-            f"[{DisplayStyle.ACCENT_COLOR}]🏢 System Code:[/{DisplayStyle.ACCENT_COLOR}] "
-            f"[bold]0x{system_code:04X}[/bold]\n"
-            f"[{DisplayStyle.SUCCESS_COLOR}]🔑 Available Keys:[/{DisplayStyle.SUCCESS_COLOR}] {keys_count}\n"
-            f"[{DisplayStyle.INFO_COLOR}]🏛️  Discovered Areas:[/{DisplayStyle.INFO_COLOR}] {areas_count}\n"
-            f"[{DisplayStyle.PRIMARY_COLOR}]⚙️  Found Services:[/{DisplayStyle.PRIMARY_COLOR}] {services_count}"
-        )
+        overview_rows = [
+            ("System code", f"[bold]0x{system_code:04X}[/bold]"),
+            ("Keys available", str(keys_count)),
+            ("Areas discovered", str(areas_count)),
+            ("Services found", str(services_count)),
+        ]
 
         return Panel(
-            overview_text,
-            title=f"[bold {DisplayStyle.ACCENT_COLOR}]System 0x{system_code:04X} Overview[/bold {DisplayStyle.ACCENT_COLOR}]",
+            self._info_table(overview_rows, label_style=DisplayStyle.ACCENT_COLOR),
+            title=f"System 0x{system_code:04X}",
             border_style=DisplayStyle.ACCENT_COLOR,
             box=DisplayStyle.PANEL_BOX,
         )
@@ -116,29 +126,17 @@ class FelicaDumper:
 
         return Progress(*columns, console=self.console, transient=True)
 
-    def _display_processing_summary(self, no_auth_count: int, auth_count: int) -> None:
-        """Display processing strategy summary."""
-        strategy_text = (
-            f"[{DisplayStyle.INFO_COLOR}]📋 Processing Strategy:[/{DisplayStyle.INFO_COLOR}]\n"
-            f"  [green]🔓 Non-authenticated services: {no_auth_count} groups[/green]\n"
-            f"  [yellow]🔒 Authenticated services: {auth_count} groups[/yellow]\n"
-            f"  [{DisplayStyle.DIM_COLOR}]⚡ Optimized order for maximum efficiency[/{DisplayStyle.DIM_COLOR}]"
-        )
-
-        strategy_panel = Panel(
-            strategy_text,
-            title="Processing Plan",
-            border_style=DisplayStyle.INFO_COLOR,
-            box=DisplayStyle.PANEL_BOX,
-        )
-        self.console.print(strategy_panel)
-
     def process_tag(self, tag: FelicaStandard) -> None:
         """Process a FeliCa tag with refined display and extract all data."""
         if not isinstance(tag, FelicaStandard):
             error_panel = Panel(
-                f"[{DisplayStyle.ERROR_COLOR}]❌ Invalid Tag Type[/{DisplayStyle.ERROR_COLOR}]\n"
-                f"Expected: FeliCa Standard\nReceived: {type(tag).__name__}",
+                Group(
+                    Align.left(
+                        f"[{DisplayStyle.ERROR_COLOR}]Invalid tag type detected[/{DisplayStyle.ERROR_COLOR}]"
+                    ),
+                    Align.left("Expected: FeliCa Standard"),
+                    Align.left(f"Received: {type(tag).__name__}"),
+                ),
                 title="Error",
                 border_style=DisplayStyle.ERROR_COLOR,
                 box=DisplayStyle.PANEL_BOX,
@@ -147,9 +145,7 @@ class FelicaDumper:
             return
 
         # Get system codes with progress
-        with self._show_processing_progress(
-            "🔍 Discovering system codes..."
-        ) as progress:
+        with self._show_processing_progress("Discovering system codes") as progress:
             discovery_task = progress.add_task("Scanning...", total=None)
             system_codes = tag.request_system_code()
             progress.update(
@@ -159,7 +155,12 @@ class FelicaDumper:
 
         if not system_codes:
             self.console.print(
-                f"[{DisplayStyle.WARNING_COLOR}]⚠️  No system codes found[/{DisplayStyle.WARNING_COLOR}]"
+                Panel(
+                    "No system codes found on this tag.",
+                    title="Scan Result",
+                    border_style=DisplayStyle.WARNING_COLOR,
+                    box=DisplayStyle.PANEL_BOX,
+                )
             )
             return
 
@@ -173,9 +174,10 @@ class FelicaDumper:
 
         # Process each system
         for system_idx, system_code in enumerate(system_codes, 1):
-            self.console.print(f"\n{'='*60}")
-            self.console.print(
-                f"[bold {DisplayStyle.ACCENT_COLOR}]Processing System {system_idx}/{len(system_codes)}[/bold {DisplayStyle.ACCENT_COLOR}]"
+            self.console.print()
+            self.console.rule(
+                f"System {system_idx}/{len(system_codes)}",
+                style=DisplayStyle.ACCENT_COLOR,
             )
 
             # Initialize tag for this system
@@ -195,7 +197,7 @@ class FelicaDumper:
 
             # Discover areas and services
             with self._show_processing_progress(
-                "🔍 Analyzing system structure..."
+                "Analyzing system structure"
             ) as progress:
                 analysis_task = progress.add_task("Discovering...", total=None)
                 areas, services = tag_reader.discover_areas_and_services()
@@ -212,47 +214,32 @@ class FelicaDumper:
             self.console.print(overview_panel)
 
             # Get key versions
-            with self._show_processing_progress(
-                "🔐 Retrieving key versions..."
-            ) as progress:
+            with self._show_processing_progress("Retrieving key versions") as progress:
                 key_task = progress.add_task("Querying...", total=None)
                 key_versions = tag_reader.get_key_versions(system_code, areas, services)
                 progress.update(key_task, description="Key versions retrieved")
                 time.sleep(0.2)
 
-            # Display detailed information
-            self.display.show_system_key_version(system_code, key_versions)
-            self.display.show_areas_table(areas, key_versions)
-
             # Process services
             service_groups = service_processor.group_overlapped_services(services)
+            issue_id_value = None
+            issue_parameter_value = None
 
             if service_groups:
-                # Show service tree
-                service_tree = self.display.create_service_tree(
-                    service_groups, key_versions
-                )
-                self.console.print(service_tree)
-
-                # Show processing strategy
                 no_auth_groups, auth_groups = optimize_service_processing_order(
                     service_groups
                 )
-                self._display_processing_summary(len(no_auth_groups), len(auth_groups))
 
                 # Process services with enhanced progress tracking
                 results = []
                 total_groups = len(service_groups)
 
                 with self._show_processing_progress(
-                    "🔄 Processing services...", total_groups
+                    "Processing services", total_groups
                 ) as progress:
                     process_task = progress.add_task(
                         "Processing...", total=total_groups
                     )
-
-                    successful = 0
-                    failed = 0
 
                     # Process non-authenticated services first
                     for group_idx, service_group in enumerate(no_auth_groups, 1):
@@ -267,10 +254,6 @@ class FelicaDumper:
                         )
                         results.append(result)
 
-                        if result.success:
-                            successful += 1
-                        else:
-                            failed += 1
                         progress.advance(process_task)
 
                     # Process authenticated services
@@ -286,71 +269,79 @@ class FelicaDumper:
                         )
                         results.append(result)
 
-                        if result.success:
-                            successful += 1
-                        else:
-                            failed += 1
                         progress.advance(process_task)
 
-                    progress.update(process_task, description="✅ Processing complete!")
+                    progress.update(process_task, description="Processing complete")
 
                 # Sort and display results
                 results.sort(key=lambda r: r.primary_service_code)
-                self.display.display_service_results(results)
-
-                # Calculate and display enhanced summary
-                total_blocks = sum(r.block_count for r in results)
-                total_time = sum(r.processing_time for r in results)
-                processing_time = time.time() - self.start_time
-
-                enhanced_summary = self._create_enhanced_summary(
-                    successful, failed, total_blocks, total_time, processing_time
+                issue_id_value = self._extract_identifier(results, "issue_id")
+                issue_parameter_value = self._extract_identifier(
+                    results, "issue_parameter"
                 )
-                self.console.print(enhanced_summary)
+                idi_hex = self._format_identifier(issue_id_value)
+                pmi_hex = self._format_identifier(issue_parameter_value)
+                service_tree = self.display.create_service_tree(
+                    system_code,
+                    areas,
+                    service_groups,
+                    key_versions,
+                    service_results=results,
+                    identifiers={
+                        "idm": idm.hex().upper(),
+                        "pmm": pmm.hex().upper(),
+                        "idi": idi_hex,
+                        "pmi": pmi_hex,
+                    },
+                )
+                self.console.print(service_tree)
 
                 # Write to text file if output is specified
                 if self.text_output:
-                    self.text_output.write_system_data(
+                    export_data = SystemExportData(
                         system_code=system_code,
                         idm=idm,
                         pmm=pmm,
+                        idi=issue_id_value,
+                        pmi=issue_parameter_value,
                         keys_file=self.keys_file,
                         keys_count=len(keys),
                         areas_count=len(areas),
                         services_count=len(services),
+                        service_groups=service_groups,
                         areas=areas,
                         key_versions=key_versions,
                         results=results,
-                        successful=successful,
-                        failed=failed,
-                        total_blocks=total_blocks,
-                        total_time=total_time,
-                        processing_time=processing_time,
                     )
+                    self.text_output.write_system_data(export_data)
             else:
                 self.console.print(
-                    f"[{DisplayStyle.WARNING_COLOR}]⚠️  No services found in this system[/{DisplayStyle.WARNING_COLOR}]"
+                    Panel(
+                        "No readable services were discovered for this system.",
+                        title="Services",
+                        border_style=DisplayStyle.WARNING_COLOR,
+                        box=DisplayStyle.PANEL_BOX,
+                    )
                 )
 
                 # Write to text file even if no services found
                 if self.text_output:
-                    self.text_output.write_system_data(
+                    export_data = SystemExportData(
                         system_code=system_code,
                         idm=idm,
                         pmm=pmm,
+                        idi=issue_id_value,
+                        pmi=issue_parameter_value,
                         keys_file=self.keys_file,
                         keys_count=len(keys),
                         areas_count=len(areas),
                         services_count=0,
+                        service_groups=[],
                         areas=areas,
                         key_versions=key_versions,
                         results=[],
-                        successful=0,
-                        failed=0,
-                        total_blocks=0,
-                        total_time=0.0,
-                        processing_time=time.time() - self.start_time,
                     )
+                    self.text_output.write_system_data(export_data)
 
         # Save text output file after processing all systems
         if self.text_output:
@@ -358,8 +349,14 @@ class FelicaDumper:
                 self.text_output.save_to_file()
                 output_path = self.text_output.get_output_path()
                 success_panel = Panel(
-                    f"[{DisplayStyle.SUCCESS_COLOR}]📄 Results saved to text file[/{DisplayStyle.SUCCESS_COLOR}]\n"
-                    f"[{DisplayStyle.INFO_COLOR}]File: {output_path}[/{DisplayStyle.INFO_COLOR}]",
+                    Group(
+                        Align.left(
+                            f"[{DisplayStyle.SUCCESS_COLOR}]Results saved to text file[/{DisplayStyle.SUCCESS_COLOR}]"
+                        ),
+                        Align.left(
+                            f"[{DisplayStyle.INFO_COLOR}]Path: {output_path}[/{DisplayStyle.INFO_COLOR}]"
+                        ),
+                    ),
                     title="Text Output",
                     border_style=DisplayStyle.SUCCESS_COLOR,
                     box=DisplayStyle.PANEL_BOX,
@@ -367,64 +364,41 @@ class FelicaDumper:
                 self.console.print(success_panel)
             except Exception as e:
                 error_panel = Panel(
-                    f"[{DisplayStyle.ERROR_COLOR}]❌ Failed to save text output[/{DisplayStyle.ERROR_COLOR}]\n"
-                    f"Error: {str(e)}",
+                    Group(
+                        Align.left(
+                            f"[{DisplayStyle.ERROR_COLOR}]Failed to save text output[/{DisplayStyle.ERROR_COLOR}]"
+                        ),
+                        Align.left(f"[{DisplayStyle.DIM_COLOR}]Error: {str(e)}[/]"),
+                    ),
                     title="Output Error",
                     border_style=DisplayStyle.ERROR_COLOR,
                     box=DisplayStyle.PANEL_BOX,
                 )
                 self.console.print(error_panel)
 
-    def _create_enhanced_summary(
-        self,
-        successful: int,
-        failed: int,
-        total_blocks: int,
-        total_time: float,
-        processing_time: float,
-    ) -> Panel:
-        """Create an enhanced summary panel with comprehensive statistics."""
-        total_services = successful + failed
-        success_rate = (successful / total_services * 100) if total_services > 0 else 0
+    @staticmethod
+    def _extract_identifier(results: list[ServiceResult], attribute: str):
+        """Return the first non-empty identifier from processed service results."""
+        for result in results:
+            value = getattr(result.used_keys, attribute, None)
+            if value:
+                return value
+        return None
 
-        # Determine border color based on success rate
-        if success_rate >= 90:
-            border_color = DisplayStyle.SUCCESS_COLOR
-            status_icon = "🎉"
-            status_text = "Excellent"
-        elif success_rate >= 75:
-            border_color = DisplayStyle.PRIMARY_COLOR
-            status_icon = "✅"
-            status_text = "Good"
-        elif success_rate >= 50:
-            border_color = DisplayStyle.WARNING_COLOR
-            status_icon = "⚠️"
-            status_text = "Partial"
-        else:
-            border_color = DisplayStyle.ERROR_COLOR
-            status_icon = "❌"
-            status_text = "Poor"
-
-        summary_text = (
-            f"[bold {DisplayStyle.SUCCESS_COLOR}]{status_icon} Processing Complete - {status_text} Results[/bold {DisplayStyle.SUCCESS_COLOR}]\n\n"
-            f"[{DisplayStyle.SUCCESS_COLOR}]✅ Successful Services:[/{DisplayStyle.SUCCESS_COLOR}] {successful}\n"
-            f"[{DisplayStyle.ERROR_COLOR}]❌ Failed Services:[/{DisplayStyle.ERROR_COLOR}] {failed}\n"
-            f"[{DisplayStyle.PRIMARY_COLOR}]📊 Success Rate:[/{DisplayStyle.PRIMARY_COLOR}] {success_rate:.1f}%\n"
-            f"[{DisplayStyle.ACCENT_COLOR}]💾 Total Blocks Read:[/{DisplayStyle.ACCENT_COLOR}] {total_blocks:,}\n"
-            f"[{DisplayStyle.INFO_COLOR}]⚡ Service Processing Time:[/{DisplayStyle.INFO_COLOR}] {total_time:.2f}s\n"
-            f"[{DisplayStyle.WARNING_COLOR}]🕐 Total Session Time:[/{DisplayStyle.WARNING_COLOR}] {processing_time:.2f}s\n"
-            f"[{DisplayStyle.DIM_COLOR}]📈 Average per Service:[/{DisplayStyle.DIM_COLOR}] "
-            f"{(total_time/total_services):.2f}s"
-            if total_services > 0
-            else "N/A"
-        )
-
-        return Panel(
-            summary_text,
-            title="[bold]📈 Final Summary[/bold]",
-            border_style=border_color,
-            box=DisplayStyle.HEADER_BOX,
-        )
+    @staticmethod
+    def _format_identifier(value) -> str | None:
+        """Format identifier bytes or strings as uppercase hex."""
+        if value is None:
+            return None
+        if isinstance(value, bytes):
+            return value.hex().upper()
+        if isinstance(value, str):
+            return value.upper()
+        # Fallback: try to interpret as bytes-like
+        try:
+            return bytes(value).hex().upper()  # type: ignore[arg-type]
+        except Exception:
+            return str(value).upper()
 
 
 def create_on_connect_callback(keys_file: str, output_file: str | None = None):
@@ -438,9 +412,15 @@ def create_on_connect_callback(keys_file: str, output_file: str | None = None):
                 dumper.process_tag(tag)
             else:
                 error_panel = Panel(
-                    f"[{DisplayStyle.ERROR_COLOR}]❌ Unsupported Tag Type[/{DisplayStyle.ERROR_COLOR}]\n"
-                    f"This application only supports FeliCa Standard tags.\n"
-                    f"Detected: {type(tag).__name__}",
+                    Group(
+                        Align.left(
+                            f"[{DisplayStyle.ERROR_COLOR}]Unsupported tag type detected[/{DisplayStyle.ERROR_COLOR}]"
+                        ),
+                        Align.left(
+                            "This application only supports FeliCa Standard tags."
+                        ),
+                        Align.left(f"Detected: {type(tag).__name__}"),
+                    ),
                     title="Tag Error",
                     border_style=DisplayStyle.ERROR_COLOR,
                     box=DisplayStyle.PANEL_BOX,
@@ -448,9 +428,13 @@ def create_on_connect_callback(keys_file: str, output_file: str | None = None):
                 console.print(error_panel)
         except Exception as e:
             error_panel = Panel(
-                f"[{DisplayStyle.ERROR_COLOR}]💥 Unexpected Error[/{DisplayStyle.ERROR_COLOR}]\n"
-                f"Error: {str(e)}\n"
-                f"Please check your NFC connection and try again.",
+                Group(
+                    Align.left(
+                        f"[{DisplayStyle.ERROR_COLOR}]Unexpected error during processing[/{DisplayStyle.ERROR_COLOR}]"
+                    ),
+                    Align.left(f"[{DisplayStyle.DIM_COLOR}]Error: {str(e)}[/]"),
+                    Align.left("Please check your NFC connection and try again."),
+                ),
                 title="System Error",
                 border_style=DisplayStyle.ERROR_COLOR,
                 box=DisplayStyle.PANEL_BOX,
@@ -499,9 +483,13 @@ Examples:
     # Display enhanced main header
     header_panel = Panel(
         Align.center(
-            f"[bold {DisplayStyle.PRIMARY_COLOR}]🎯 FeliCa Dumper v1.0[/bold {DisplayStyle.PRIMARY_COLOR}]\n"
-            f"[{DisplayStyle.INFO_COLOR}]FeliCa Card Data Extraction Tool[/{DisplayStyle.INFO_COLOR}]\n"
-            f"[{DisplayStyle.DIM_COLOR}]Place your FeliCa card on the reader...[/{DisplayStyle.DIM_COLOR}]"
+            "\n".join(
+                [
+                    f"[bold {DisplayStyle.PRIMARY_COLOR}]FeliCa Dumper v1.0[/bold {DisplayStyle.PRIMARY_COLOR}]",
+                    f"[{DisplayStyle.INFO_COLOR}]FeliCa card data extraction tool[/{DisplayStyle.INFO_COLOR}]",
+                    f"[{DisplayStyle.DIM_COLOR}]Place your FeliCa card on the reader to begin[/{DisplayStyle.DIM_COLOR}]",
+                ]
+            )
         ),
         box=DisplayStyle.HEADER_BOX,
         border_style=DisplayStyle.PRIMARY_COLOR,
@@ -509,20 +497,20 @@ Examples:
     )
     console.print(header_panel)
 
-    # Show configuration
-    config_text = (
-        f"[{DisplayStyle.INFO_COLOR}]🔧 Configuration:[/{DisplayStyle.INFO_COLOR}]\n"
-        f"  Keys file: [bold]{args.keys}[/bold]\n"
-        f"  NFC Interface: USB\n"
-        f"  Supported frequencies: 212F, 424F"
+    # Show configuration using a compact table
+    config_table = Table.grid(padding=(0, 1))
+    config_table.add_column(
+        style=DisplayStyle.INFO_COLOR, justify="right", no_wrap=True
     )
-
+    config_table.add_column(style="white")
+    config_table.add_row("Keys file", f"[bold]{args.keys}[/bold]")
+    config_table.add_row("NFC interface", "USB")
+    config_table.add_row("Supported modes", "212F, 424F")
     if args.output:
-        config_text += f"\n  Output file: [bold]{args.output}[/bold]"
-
+        config_table.add_row("Output file", f"[bold]{args.output}[/bold]")
     config_panel = Panel(
-        config_text,
-        title="Setup",
+        config_table,
+        title="Configuration",
         border_style=DisplayStyle.INFO_COLOR,
         box=DisplayStyle.PANEL_BOX,
     )
@@ -534,11 +522,9 @@ Examples:
     try:
         with nfc.ContactlessFrontend("usb") as clf:
             console.print(
-                f"[{DisplayStyle.SUCCESS_COLOR}]🔌 NFC reader initialized successfully[/{DisplayStyle.SUCCESS_COLOR}]"
+                f"[{DisplayStyle.SUCCESS_COLOR}]NFC reader initialized successfully[/{DisplayStyle.SUCCESS_COLOR}]"
             )
-            console.print(
-                f"[{DisplayStyle.WARNING_COLOR}]⏳ Waiting for FeliCa card...[/{DisplayStyle.WARNING_COLOR}]"
-            )
+            console.print(f"[{DisplayStyle.DIM_COLOR}]Waiting for FeliCa card...[/]")
 
             clf.connect(
                 rdwr={
@@ -549,12 +535,18 @@ Examples:
             )
     except Exception as e:
         error_panel = Panel(
-            f"[{DisplayStyle.ERROR_COLOR}]💥 Failed to initialize NFC reader[/{DisplayStyle.ERROR_COLOR}]\n"
-            f"Error: {str(e)}\n\n"
-            f"[{DisplayStyle.INFO_COLOR}]Troubleshooting:[/{DisplayStyle.INFO_COLOR}]\n"
-            f"• Check if NFC reader is connected\n"
-            f"• Verify USB permissions\n"
-            f"• Try running with sudo (Linux/macOS)",
+            Group(
+                Align.left(
+                    f"[{DisplayStyle.ERROR_COLOR}]Failed to initialize NFC reader[/{DisplayStyle.ERROR_COLOR}]"
+                ),
+                Align.left(f"[{DisplayStyle.DIM_COLOR}]Error: {str(e)}[/]"),
+                Align.left(
+                    f"[{DisplayStyle.INFO_COLOR}]Troubleshooting steps:[/{DisplayStyle.INFO_COLOR}]"
+                ),
+                Align.left("- Confirm the NFC reader is connected"),
+                Align.left("- Verify USB permissions"),
+                Align.left("- Retry with elevated privileges if required"),
+            ),
             title="Initialization Error",
             border_style=DisplayStyle.ERROR_COLOR,
             box=DisplayStyle.PANEL_BOX,

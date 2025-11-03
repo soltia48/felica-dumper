@@ -30,6 +30,8 @@ class UsedKeys:
     authentication_status: Literal[
         "none", "successful", "failed_missing_keys", "failed_error"
     ] = "none"  # Authentication status
+    issue_id: bytes | None = None  # IDi returned from authentication
+    issue_parameter: bytes | None = None  # PMi returned from authentication
 
     def get_all_keys(self) -> list[KeyInfo]:
         """Get all used keys"""

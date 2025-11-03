@@ -1,11 +1,7 @@
 """Display management for FeliCa Dumper UI."""
 
 from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
 from rich.tree import Tree
-from rich.align import Align
-from rich import box
 
 from ..models import ServiceResult
 from .formatters import KeyVersionFormatter
@@ -18,293 +14,319 @@ class DisplayManager:
         self.console = console or Console()
         self.formatter = KeyVersionFormatter()
 
-    def show_system_header(self, system_code: int):
-        """Display system header."""
-        self.console.print(
-            f"\n[bold magenta]🏢 System 0x{system_code:04X}[/bold magenta]"
-        )
+    BLOCK_PREVIEW_LIMIT = 16
 
-    def show_system_info(self, keys_count: int, areas_count: int, services_count: int):
-        """Display system information panel."""
-        info_text = f"[green]🔑 Keys Loaded:[/green] {keys_count}\n"
-        info_text += f"[blue]🏛️  Areas Found:[/blue] {areas_count}\n"
-        info_text += f"[cyan]⚙️  Services Found:[/cyan] {services_count}"
-
-        self.console.print(
-            Panel(info_text, title="System Information", box=box.ROUNDED)
-        )
-
-    def show_system_key_version(self, system_code: int, key_versions: dict):
-        """Display system key version."""
-        if system_code in key_versions["system"]:
-            result = key_versions["system"][system_code]
-            key_display = self.formatter.format_key_version(result)
-            self.console.print(f"[bold]System Key Version:[/bold] {key_display}")
-
-    def show_areas_table(self, areas: list[tuple[int, int]], key_versions: dict):
-        """Display areas table."""
-        if not areas:
-            return
-
-        area_table = Table(title="🏛️  Areas", box=box.SIMPLE)
-        area_table.add_column("Area", style="cyan")
-        area_table.add_column("Range", style="yellow")
-        area_table.add_column("Key Version", style="green")
-
-        for i, (start, end) in enumerate(areas):
-            key_info = "Not available"
-            if (start, end) in key_versions["areas"]:
-                result = key_versions["areas"][(start, end)]
-                key_info = self.formatter.format_key_version(result)
-
-            area_table.add_row(
-                f"Area {i+1}", self.formatter.format_area_range(start, end), key_info
+    def create_service_tree(
+        self,
+        system_code: int,
+        areas: list[tuple[int, int]],
+        service_groups: list[list[int]],
+        key_versions: dict,
+        service_results: list[ServiceResult] | None = None,
+        identifiers: dict[str, str | None] | None = None,
+    ) -> Tree:
+        """Create a tree structure displaying system, areas, and services."""
+        system_label = f"[bold blue]System 0x{system_code:04X}[/bold blue]"
+        system_key = key_versions.get("system", {}).get(system_code)
+        if system_key is not None:
+            system_label += (
+                f"  [dim]Key[/dim] {self.formatter.format_key_version(system_key)}"
             )
 
-        self.console.print(area_table)
+        tree = Tree(system_label)
+        tree.add(
+            f"[dim]Areas discovered: {len(areas)} | Service groups: {len(service_groups)}[/dim]"
+        )
 
-    def create_service_tree(self, service_groups: list, key_versions: dict) -> Tree:
-        """Create a tree structure for displaying services."""
-        tree = Tree("📊 [bold blue]Services & Areas[/bold blue]")
+        if identifiers:
+            idm = identifiers.get("idm")
+            pmm = identifiers.get("pmm")
+            idi = identifiers.get("idi")
+            pmi = identifiers.get("pmi")
+            id_segments = []
+            if idm:
+                id_segments.append(f"IDm: {idm}")
+            if pmm:
+                id_segments.append(f"PMm: {pmm}")
+            if idi:
+                id_segments.append(f"IDi: {idi}")
+            if pmi:
+                id_segments.append(f"PMi: {pmi}")
+            if id_segments:
+                tree.add(f"[dim]{' | '.join(id_segments)}[/dim]")
 
-        group_num = 1
-        for service_group in service_groups:
-            if len(service_group) == 1:
-                service = service_group[0]
-                auth_icon = "🔒" if not (service & 1) else "🔓"
-                auth_text = (
-                    "[red]Auth required[/red]"
-                    if not (service & 1)
-                    else "[green]No auth needed[/green]"
+        if service_results:
+            success_count = sum(1 for r in service_results if r.success)
+            failure_count = len(service_results) - success_count
+            total_blocks = sum(r.block_count for r in service_results)
+            tree.add(
+                f"[dim]Processed services: {len(service_results)} | Success: {success_count} | "
+                f"Failed: {failure_count} | Blocks: {total_blocks}[/dim]"
+            )
+
+        area_nodes, root_areas = self._build_area_hierarchy(areas)
+        unassigned_groups = self._assign_service_groups_to_areas(
+            area_nodes, service_groups
+        )
+        result_lookup = self._build_result_lookup(service_results)
+
+        if root_areas:
+            areas_node = tree.add("[cyan]Areas[/cyan]")
+            for area in root_areas:
+                self._add_area_branch(
+                    areas_node, area, area_nodes, key_versions, result_lookup
                 )
+        else:
+            tree.add("[dim]No areas discovered for this system[/dim]")
 
-                # Add key version information
-                key_info = ""
-                if service in key_versions["services"]:
-                    result = key_versions["services"][service]
-                    key_display = self.formatter.format_key_version(result)
-                    key_info = f" - {key_display}"
-
-                service_node = tree.add(
-                    f"{auth_icon} [cyan]Service 0x{service:04X}[/cyan] ({auth_text}){key_info}"
+        # Unassigned services (service codes without matching area range)
+        if unassigned_groups:
+            services_node = tree.add("[yellow]Services without matching area[/yellow]")
+            for group in unassigned_groups:
+                self._add_service_group_node(
+                    services_node, group, key_versions, result_lookup
                 )
-            else:
-                service_codes = self.formatter.format_service_codes(service_group)
-                auth_icons = []
-                for sc in service_group:
-                    auth_icons.append("🔒" if not (sc & 1) else "🔓")
-
-                # Add key version information for overlapped services
-                key_info_parts = []
-                for sc in service_group:
-                    if sc in key_versions["services"]:
-                        result = key_versions["services"][sc]
-                        key_display = self.formatter.format_key_version(result)
-                        key_info_parts.append(f"0x{sc:04X}: {key_display}")
-
-                key_info = ""
-                if key_info_parts:
-                    key_info = f" - {', '.join(key_info_parts)}"
-
-                group_node = tree.add(
-                    f"🔗 [yellow]Service Group[/yellow]: {service_codes} (Overlapped: {' '.join(auth_icons)}){key_info}"
-                )
-
-            group_num += 1
 
         return tree
 
-    def show_processing_order(self, no_auth_count: int, auth_count: int):
-        """Display processing order information."""
-        self.console.print(
-            f"\n[dim]Processing order: {no_auth_count} non-auth groups first, then {auth_count} auth groups[/dim]"
-        )
+    def _format_service_group_label(
+        self,
+        service_group: list[int],
+        key_versions: dict,
+        result: ServiceResult | None = None,
+    ) -> str:
+        """Format a service group label with authentication, key, and status information."""
+        service_display = self.formatter.format_service_codes(service_group)
+        if len(service_group) == 1:
+            label = f"Service {service_display}"
+        else:
+            label = f"Service group {service_display}"
 
-    def display_service_results(self, results: list[ServiceResult]):
-        """Display service results with enhanced formatting and detailed block data."""
-        if not results:
-            self.console.print("[dim]No service results to display[/dim]")
+        auth_values = [bool(sc & 1) for sc in service_group]
+        if all(auth_values):
+            auth_text = "[green]no authentication required[/green]"
+        elif any(auth_values):
+            auth_text = "[yellow]mixed authentication requirements[/yellow]"
+        else:
+            auth_text = "[red]authentication required[/red]"
+
+        label += f" ({auth_text})"
+
+        key_info_parts = []
+        for sc in service_group:
+            key_result = key_versions.get("services", {}).get(sc)
+            if key_result is not None:
+                key_info_parts.append(
+                    f"0x{sc:04X}:{self.formatter.format_key_version(key_result)}"
+                )
+
+        meta_segments: list[str] = []
+
+        if result is not None:
+            status_text = (
+                "[green]success[/green]" if result.success else "[red]failed[/red]"
+            )
+            meta_segments.append(f"[dim]status[/dim] {status_text}")
+            meta_segments.append(f"[cyan]{result.block_count} block(s)[/cyan]")
+
+        if key_info_parts:
+            meta_segments.append(f"[dim]keys[/dim] {', '.join(key_info_parts)}")
+
+        if meta_segments:
+            label += "  " + " | ".join(meta_segments)
+
+        return label
+
+    def _build_area_hierarchy(
+        self, areas: list[tuple[int, int]]
+    ) -> tuple[dict[tuple[int, int], dict], list[tuple[int, int]]]:
+        """Build parent-child relationships between areas based on containment."""
+        if not areas:
+            return {}, []
+
+        nodes = {area: {"children": [], "groups": [], "parent": None} for area in areas}
+
+        sorted_areas = sorted(areas, key=lambda a: (a[0], (a[1] - a[0]), a[1]))
+
+        for current in sorted_areas:
+            best_parent: tuple[int, int] | None = None
+            smallest_size = None
+
+            for candidate in sorted_areas:
+                if candidate == current:
+                    continue
+
+                if candidate[0] <= current[0] and current[1] <= candidate[1]:
+                    candidate_size = candidate[1] - candidate[0]
+                    if smallest_size is None or candidate_size < smallest_size:
+                        best_parent = candidate
+                        smallest_size = candidate_size
+
+            if best_parent is not None:
+                nodes[current]["parent"] = best_parent
+                nodes[best_parent]["children"].append(current)
+
+        for node in nodes.values():
+            node["children"].sort(key=lambda a: (a[0], (a[1] - a[0]), a[1]))
+
+        root_areas = [area for area, data in nodes.items() if data["parent"] is None]
+        root_areas.sort(key=lambda a: (a[0], (a[1] - a[0]), a[1]))
+
+        return nodes, root_areas
+
+    def _assign_service_groups_to_areas(
+        self,
+        area_nodes: dict[tuple[int, int], dict],
+        service_groups: list[list[int]],
+    ) -> list[list[int]]:
+        """Assign service groups to the most specific area that contains them."""
+        if not area_nodes:
+            return service_groups.copy()
+
+        unassigned: list[list[int]] = []
+
+        for group in service_groups:
+            if not group:
+                continue
+
+            primary = min(group)
+            candidates = [area for area in area_nodes if area[0] <= primary <= area[1]]
+
+            if not candidates:
+                unassigned.append(group)
+                continue
+
+            target = min(candidates, key=lambda a: (a[1] - a[0], a[0], a[1]))
+            area_nodes[target]["groups"].append(group)
+
+        return unassigned
+
+    def _add_area_branch(
+        self,
+        parent_node: Tree,
+        area: tuple[int, int],
+        area_nodes: dict[tuple[int, int], dict],
+        key_versions: dict,
+        result_lookup: dict[tuple[int, ...], ServiceResult],
+    ) -> None:
+        """Recursively add an area and its descendants to the tree."""
+        area_label = self._format_area_label(area, key_versions)
+        current_node = parent_node.add(area_label)
+
+        for group in area_nodes[area]["groups"]:
+            self._add_service_group_node(
+                current_node, group, key_versions, result_lookup
+            )
+
+        children = area_nodes[area]["children"]
+        if children:
+            for child in children:
+                self._add_area_branch(
+                    current_node, child, area_nodes, key_versions, result_lookup
+                )
+
+        if not children and not area_nodes[area]["groups"]:
+            current_node.add("[dim]No services assigned to this area[/dim]")
+
+    def _format_area_label(self, area: tuple[int, int], key_versions: dict) -> str:
+        """Format area label with range and key information."""
+        range_text = self.formatter.format_area_range(*area)
+        label = f"Area [{range_text}]"
+
+        area_key = key_versions.get("areas", {}).get(area)
+        if area_key is not None:
+            label += f"  [dim]Key[/dim] {self.formatter.format_key_version(area_key)}"
+
+        return label
+
+    def _build_result_lookup(
+        self, service_results: list[ServiceResult] | None
+    ) -> dict[tuple[int, ...], ServiceResult]:
+        """Create a lookup from service code tuples to ServiceResult instances."""
+        if not service_results:
+            return {}
+
+        lookup: dict[tuple[int, ...], ServiceResult] = {}
+        for result in service_results:
+            key = tuple(result.service_codes)
+            lookup[key] = result
+            sorted_key = tuple(sorted(result.service_codes))
+            lookup[sorted_key] = result
+        return lookup
+
+    def _find_service_result(
+        self,
+        service_group: list[int],
+        lookup: dict[tuple[int, ...], ServiceResult],
+    ) -> ServiceResult | None:
+        """Locate the ServiceResult corresponding to a service group."""
+        if not lookup:
+            return None
+
+        key = tuple(service_group)
+        if key in lookup:
+            return lookup[key]
+
+        sorted_key = tuple(sorted(service_group))
+        return lookup.get(sorted_key)
+
+    def _add_service_group_node(
+        self,
+        parent_node: Tree,
+        service_group: list[int],
+        key_versions: dict,
+        result_lookup: dict[tuple[int, ...], ServiceResult],
+    ) -> None:
+        """Add a service group node to the tree, including block data if available."""
+        result = self._find_service_result(service_group, result_lookup)
+        label = self._format_service_group_label(service_group, key_versions, result)
+        group_node = parent_node.add(label)
+
+        if result is None:
             return
 
-        # Header with results count
-        results_header = Panel(
-            f"[bold bright_blue]📋 Service Processing Results[/bold bright_blue]\n"
-            f"[dim]Displaying {len(results)} service result(s)[/dim]",
-            border_style="bright_blue",
-            box=box.ROUNDED,
-        )
-        self.console.print(results_header)
+        if result.success:
+            self._add_block_lines(group_node, result)
+        else:
+            self._add_error_lines(group_node, result)
 
-        for idx, result in enumerate(results, 1):
-            # Format service codes
-            service_display = self.formatter.format_service_codes(result.service_codes)
+    def _add_block_lines(self, service_node: Tree, result: ServiceResult) -> None:
+        """Add block data lines as children of the service node."""
+        block_lines = [
+            line.strip()
+            for line in result.output_lines
+            if "Block" in line and line.strip()
+        ]
 
-            # Enhanced status with performance indicators
-            if result.success:
-                status_icon = "✅"
-                status_text = "[bright_green]Success[/bright_green]"
-                border_color = "bright_green"
-
-                # Performance indicator based on processing time
-                if result.processing_time < 1.0:
-                    perf_icon = "⚡"
-                    perf_text = "[green]Fast[/green]"
-                elif result.processing_time < 3.0:
-                    perf_icon = "🔄"
-                    perf_text = "[yellow]Normal[/yellow]"
-                else:
-                    perf_icon = "🐌"
-                    perf_text = "[orange3]Slow[/orange3]"
+        if not block_lines:
+            if result.block_count > 0:
+                service_node.add(
+                    f"[cyan]Read {result.block_count} block(s) (no textual data available)[/cyan]"
+                )
             else:
-                status_icon = "❌"
-                status_text = "[bright_red]Failed[/bright_red]"
-                border_color = "bright_red"
-                perf_icon = "⏸️"
-                perf_text = "[dim]N/A[/dim]"
+                service_node.add("[dim]No block data available[/dim]")
+            return
 
-            # Create enhanced service header
-            service_header = (
-                f"[bold cyan]Service {service_display}[/bold cyan] | "
-                f"{status_icon} {status_text} | "
-                f"[magenta]📦 {result.block_count} blocks[/magenta] | "
-                f"[yellow]⏱️  {result.processing_time:.2f}s[/yellow] | "
-                f"{perf_icon} {perf_text}"
-            )
+        preview = block_lines[: self.BLOCK_PREVIEW_LIMIT]
+        for line in preview:
+            service_node.add(f"[bold white]{line}[/bold white]")
 
-            panel_content = service_header
+        remaining = len(block_lines) - len(preview)
+        if remaining > 0:
+            service_node.add(f"[dim]… {remaining} more block line(s) omitted[/dim]")
 
-            # Enhanced authentication information based on authentication status
-            auth_status = result.used_keys.authentication_status
+    def _add_error_lines(self, service_node: Tree, result: ServiceResult) -> None:
+        """Add error lines for services that failed to process."""
+        messages = [line.strip() for line in result.output_lines if line.strip()]
 
-            if auth_status == "none":
-                panel_content += f"\n\n[bold]🔓 Authentication:[/bold] [bright_green]No authentication required[/bright_green]"
-            elif auth_status == "successful":
-                auth_sections = []
+        if not messages:
+            service_node.add("[red]Processing failed (no details available).[/red]")
+            return
 
-                # System key section with enhanced formatting
-                if result.used_keys.system_key:
-                    sys_key = result.used_keys.system_key
-                    auth_sections.append(
-                        f"[bold bright_blue]🔐 System Key:[/bold bright_blue] {self.formatter.format_key_info(sys_key)}"
-                    )
+        preview = messages[:3]
+        for line in preview:
+            service_node.add(f"[red]{line}[/red]")
 
-                # Area keys section
-                if result.used_keys.area_keys:
-                    area_keys_display = []
-                    for key in result.used_keys.area_keys:
-                        area_keys_display.append(self.formatter.format_key_info(key))
-                    auth_sections.append(
-                        f"[bold bright_green]🏛️  Area Keys:[/bold bright_green] {', '.join(area_keys_display)}"
-                    )
-
-                # Service keys section
-                if result.used_keys.service_keys:
-                    service_keys_display = []
-                    for key in result.used_keys.service_keys:
-                        service_keys_display.append(self.formatter.format_key_info(key))
-                    auth_sections.append(
-                        f"[bold magenta]⚙️  Service Keys:[/bold magenta] {', '.join(service_keys_display)}"
-                    )
-
-                if auth_sections:
-                    auth_display = "\n".join(
-                        [f"  {section}" for section in auth_sections]
-                    )
-                    panel_content += f"\n\n[bold]🔑 Authentication:[/bold] [bright_green]✅ Successful[/bright_green]\n{auth_display}"
-            elif auth_status == "failed_missing_keys":
-                panel_content += f"\n\n[bold]🔑 Authentication:[/bold] [bright_red]❌ Failed - Missing required keys[/bright_red]"
-            elif auth_status == "failed_error":
-                panel_content += f"\n\n[bold]🔑 Authentication:[/bold] [bright_red]❌ Failed - Authentication error[/bright_red]"
-
-            # Enhanced block data display
-            if result.success and result.output_lines:
-                # Filter and format block data
-                block_lines = [line for line in result.output_lines if "Block" in line]
-                if block_lines:
-                    block_display = "\n".join(block_lines)
-
-                    panel_content += f"\n\n[bold]📊 Block Data:[/bold]\n[bright_green]{block_display}[/bright_green]"
-
-                # Show additional output if available
-                other_lines = [
-                    line
-                    for line in result.output_lines
-                    if "Block" not in line and line.strip()
-                ]
-                if other_lines:
-                    other_display = "\n".join(
-                        other_lines[:2]
-                    )  # Show first 2 non-block lines
-                    if len(other_lines) > 2:
-                        other_display += (
-                            f"\n[dim]... {len(other_lines) - 2} more lines[/dim]"
-                        )
-                    panel_content += f"\n\n[bold]📝 Additional Info:[/bold]\n[cyan]{other_display}[/cyan]"
-
-            elif not result.success and result.output_lines:
-                # Enhanced error information
-                error_lines = result.output_lines[:3]  # Show first 3 error lines
-                error_display = "\n".join(error_lines)
-                if len(result.output_lines) > 3:
-                    error_display += f"\n[dim]... {len(result.output_lines) - 3} more error lines[/dim]"
-                panel_content += f"\n\n[bold]💥 Error Details:[/bold]\n[bright_red]{error_display}[/bright_red]"
-
-            # Display the enhanced panel
-            panel_title = (
-                f"[bold]{idx}/{len(results)}: Service {service_display}[/bold]"
-            )
-            service_panel = Panel(
-                panel_content,
-                title=panel_title,
-                border_style=border_color,
-                box=box.ROUNDED,
-                expand=False,
-            )
-            self.console.print(service_panel)
-
-            # Add subtle spacing between services
-            if idx < len(results):
-                self.console.print()
-
-    def create_summary_panel(
-        self,
-        successful: int,
-        failed: int,
-        total_blocks: int,
-        total_time: float,
-        warnings: int,
-    ) -> Panel:
-        """Create a summary panel with statistics."""
-        success_rate = (
-            (successful / (successful + failed)) * 100
-            if (successful + failed) > 0
-            else 0
-        )
-
-        summary_text = f"""[green]✅ Successful:[/green] {successful}
-[red]❌ Failed:[/red] {failed}
-[blue]📊 Success Rate:[/blue] {success_rate:.1f}%
-[magenta]💾 Total Blocks:[/magenta] {total_blocks}
-[yellow]⏱️  Total Time:[/yellow] {total_time:.2f}s
-[orange3]⚠️  Warnings:[/orange3] {warnings}"""
-
-        return Panel(
-            summary_text,
-            title="📈 Final Summary",
-            border_style=(
-                "green"
-                if success_rate > 75
-                else "yellow" if success_rate > 50 else "red"
-            ),
-            box=box.ROUNDED,
-        )
-
-    def show_main_header(self):
-        """Display the main application header."""
-        self.console.print(
-            Panel(
-                Align.center("[bold blue]FeliCa Dumper[/bold blue]"),
-                box=box.DOUBLE,
-                border_style="blue",
-            )
-        )
+        remaining = len(messages) - len(preview)
+        if remaining > 0:
+            service_node.add(f"[dim]… {remaining} additional message(s)[/dim]")
