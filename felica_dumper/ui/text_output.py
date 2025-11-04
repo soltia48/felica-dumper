@@ -103,8 +103,6 @@ class TextOutputManager:
 
         self.content_lines.extend(overview_lines)
 
-    BLOCK_PREVIEW_LIMIT = 16
-
     def _add_system_tree(
         self,
         areas: list[tuple[int, int]],
@@ -240,16 +238,9 @@ class TextOutputManager:
                 self.content_lines.append(f"{indent_str}(No block data available)")
             return
 
-        preview = block_lines[: self.BLOCK_PREVIEW_LIMIT]
-        for line in preview:
+        for line in block_lines:
             clean_line = self._strip_rich_markup(line)
             self.content_lines.append(f"{indent_str}{clean_line}")
-
-        remaining = len(block_lines) - len(preview)
-        if remaining > 0:
-            self.content_lines.append(
-                f"{indent_str}... {remaining} more block line(s) omitted"
-            )
 
     def _append_error_lines(self, result: ServiceResult, indent: int) -> None:
         """Append error message lines with indentation."""

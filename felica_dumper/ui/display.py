@@ -14,8 +14,6 @@ class DisplayManager:
         self.console = console or Console()
         self.formatter = KeyVersionFormatter()
 
-    BLOCK_PREVIEW_LIMIT = 16
-
     def create_service_tree(
         self,
         system_code: int,
@@ -307,13 +305,8 @@ class DisplayManager:
                 service_node.add("[dim]No block data available[/dim]")
             return
 
-        preview = block_lines[: self.BLOCK_PREVIEW_LIMIT]
-        for line in preview:
+        for line in block_lines:
             service_node.add(f"[bold white]{line}[/bold white]")
-
-        remaining = len(block_lines) - len(preview)
-        if remaining > 0:
-            service_node.add(f"[dim]… {remaining} more block line(s) omitted[/dim]")
 
     def _add_error_lines(self, service_node: Tree, result: ServiceResult) -> None:
         """Add error lines for services that failed to process."""
